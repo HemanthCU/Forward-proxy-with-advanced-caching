@@ -1,5 +1,5 @@
 /* 
- * httpserver.c - A server to handle different HTTP requests to load a website
+ * proxyserver.c - A server to handle different HTTP requests to load a website
  */
 
 #include <stdio.h>
