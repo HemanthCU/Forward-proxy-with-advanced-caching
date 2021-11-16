@@ -19,9 +19,11 @@
 #define MAXREAD  80000
 
 int open_listenfd(int port);
+int open_sendfd(int port, char *host);
 void echo(int connfd);
 void *thread(void *vargp);
 char* getContentType(char *tgtpath);
+char* hostname_to_ip(char *hostname);
 
 int main(int argc, char **argv) {
     int listenfd, *connfdp, port, clientlen=sizeof(struct sockaddr_in);
@@ -86,6 +88,7 @@ char* getContentType(char *tgtpath) {
 /* thread routine */
 void * thread(void * vargp) {
     int connfd = *((int *)vargp);
+    int sendfd;
     pthread_detach(pthread_self());
     free(vargp);
     // Process the header to get details of request
@@ -94,6 +97,7 @@ void * thread(void * vargp) {
     int first = 1; /* Denotes if this is the first execution of the while loop */
     int msgsz; /* Size of data read from the file */
     char buf[MAXLINE]; /* Request full message */
+    char buf1[MAXLINE]; /* Request full message */
     char *resp = (char*) malloc (MAXBUF*sizeof(char)); /* Response header */
     unsigned char *msg = (char*) malloc (MAXREAD*sizeof(char)); /* Data read from the file */
     char *context = NULL; /* Pointer used for string tokenizer */
@@ -113,6 +117,7 @@ void * thread(void * vargp) {
         else
             first = 0;
         n = read(connfd, buf, MAXLINE);
+        memcpy(buf1, buf, sizeof(buf));
         if ((int)n >= 0) {
             printf("Request received\n");
             comd = strtok_r(buf, " \t\r\n\v\f", &context);
@@ -122,7 +127,7 @@ void * thread(void * vargp) {
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
 
             // Based on the incoming header data, decide if the connection must be persistent or not.
-            if (strcmp(httpver, "HTTP/1.1") == 0) {
+            /*if (strcmp(httpver, "HTTP/1.1") == 0) {
                 c = context[1];
                 if (c != '\r') {
                     temp = strtok_r(NULL, " \t\r\n\v\f", &context);
@@ -135,12 +140,21 @@ void * thread(void * vargp) {
                 } else {
                     keepalive = 1;
                 }
-            }
-            //printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath1, httpver, host, keepalive);
+            }*/
+            printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath, httpver, host, keepalive);
             // Choose what to perform based on comd
             if (strcmp(comd, "GET") == 0) {
-                // Handle GET command - Read data from the tgtpath1 and respond with header data and the document
-                
+                sendfd = open_sendfd(9000, host);
+                if (sendfd < 0) {
+                    printf("sendfd < 0\n");
+                    sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
+                    sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
+                    write(connfd, resp, strlen(resp));
+                } else {
+                    write(sendfd, buf1, sizeof(buf1));
+                    read(sendfd, resp, MAXBUF);
+                    write(connfd, resp, strlen(resp));
+                }
             } else {
                 // Process Internal Server errors like HTTP commands that are not supported
                 sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
@@ -197,3 +211,52 @@ int open_listenfd(int port) {
     return listenfd;
 } /* end open_listenfd */
 
+/* 
+ * open_sendfd - open and return a sending socket on port
+ * Returns -1 in case of failure 
+ */
+int open_sendfd(int port, char *host) {
+    int sendfd;
+    struct sockaddr_in serveraddr;
+    char *hostip;
+
+    /* Create a socket descriptor */
+    if ((sendfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        return -1;
+    printf("reach1 host = %s\n", host);
+    hostip = hostname_to_ip(host);
+    if (strcmp(hostip, "error") == 0)
+        return -1;
+    printf("reach2 hostip = %s\n", hostip);
+    bzero((char *) &serveraddr, sizeof(serveraddr));
+    serveraddr.sin_family = AF_INET; 
+    serveraddr.sin_addr.s_addr = inet_addr(hostip); 
+    serveraddr.sin_port = htons((unsigned short)port);
+    if (connect(sendfd, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0)
+        return -1;
+    printf("reach3\n");
+    return sendfd;
+} /* end open_sendfd */
+
+char* hostname_to_ip(char *hostname) {
+    struct hostent *he;
+    struct in_addr **addr_list;
+    char *ip = (char*) malloc (20 * sizeof(char));
+    int i;
+
+    if ((he = gethostbyname( hostname)) == NULL) {
+        // get the host info
+        herror("gethostbyname");
+        return "error";
+    }
+
+    addr_list = (struct in_addr **) he->h_addr_list;
+
+    for (i = 0; addr_list[i] != NULL; i++) {
+        //Return the first one;
+        strcpy(ip , inet_ntoa(*addr_list[i]) );
+        return ip;
+    }
+
+    return ip;
+}
