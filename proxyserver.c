@@ -127,7 +127,7 @@ void * thread(void * vargp) {
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
 
             // Based on the incoming header data, decide if the connection must be persistent or not.
-            /*if (strcmp(httpver, "HTTP/1.1") == 0) {
+            if (strcmp(httpver, "HTTP/1.1") == 0) {
                 c = context[1];
                 if (c != '\r') {
                     temp = strtok_r(NULL, " \t\r\n\v\f", &context);
@@ -140,11 +140,11 @@ void * thread(void * vargp) {
                 } else {
                     keepalive = 1;
                 }
-            }*/
+            }
             printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath, httpver, host, keepalive);
             // Choose what to perform based on comd
             if (strcmp(comd, "GET") == 0) {
-                sendfd = open_sendfd(9000, host);
+                sendfd = open_sendfd(80, host);
                 if (sendfd < 0) {
                     printf("sendfd < 0\n");
                     sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
@@ -223,18 +223,15 @@ int open_sendfd(int port, char *host) {
     /* Create a socket descriptor */
     if ((sendfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         return -1;
-    printf("reach1 host = %s\n", host);
     hostip = hostname_to_ip(host);
     if (strcmp(hostip, "error") == 0)
         return -1;
-    printf("reach2 hostip = %s\n", hostip);
     bzero((char *) &serveraddr, sizeof(serveraddr));
     serveraddr.sin_family = AF_INET; 
     serveraddr.sin_addr.s_addr = inet_addr(hostip); 
     serveraddr.sin_port = htons((unsigned short)port);
     if (connect(sendfd, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0)
         return -1;
-    printf("reach3\n");
     return sendfd;
 } /* end open_sendfd */
 
