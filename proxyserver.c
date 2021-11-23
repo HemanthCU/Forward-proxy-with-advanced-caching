@@ -12,11 +12,13 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <openssl/md5.h>
 
 #define MAXLINE  8192  /* max text line length */
 #define MAXBUF   8192  /* max I/O buffer size */
 #define LISTENQ  1024  /* second argument to listen() */
 #define MAXREAD  80000
+#define HOSTLEN  100
 
 int open_listenfd(int port);
 int open_sendfd(int port, char *host);
@@ -24,9 +26,23 @@ void echo(int connfd);
 void *thread(void *vargp);
 char* getContentType(char *tgtpath);
 char* hostname_to_ip(char *hostname);
+char* checkCache(char *url);
+char* str2md5(const char *str, int length);
+
+char ***cacheList;
+int cacheLen;
 
 int main(int argc, char **argv) {
-    int listenfd, *connfdp, port, clientlen=sizeof(struct sockaddr_in);
+    int i, j, listenfd, *connfdp, port, clientlen=sizeof(struct sockaddr_in);
+    cacheList = (char***) malloc (400 * sizeof(char**));
+    for (i = 0; i < 400; i++) {
+        cacheList[i] = (char**) malloc (3 * sizeof(char*));
+        for (j = 0; j < 3; j++) {
+            cacheList[i][j] = (char*) malloc (HOSTLEN * sizeof(char));
+            bzero(cacheList[i][j], HOSTLEN);
+        }
+    }
+    cacheLen = 0;
     struct sockaddr_in clientaddr;
     pthread_t tid; 
 
@@ -85,6 +101,43 @@ char* getContentType(char *tgtpath) {
     return temp4;
 }
 
+char* checkCache(char *url) {
+    int i;
+    for (i = 0; i < cacheLen; i++) {
+        if(strcmp(url, cacheList[i][0]) == 0) {
+            return cacheList[i][1];
+        }
+    }
+    return "";
+}
+
+char* str2md5(const char *str, int length) {
+    int n;
+    MD5_CTX c;
+    unsigned char digest[16];
+    char *out = (char*) malloc (33);
+
+    MD5_Init(&c);
+
+    while (length > 0) {
+        if (length > 512) {
+            MD5_Update(&c, str, 512);
+        } else {
+            MD5_Update(&c, str, length);
+        }
+        length -= 512;
+        str += 512;
+    }
+
+    MD5_Final(digest, &c);
+
+    for (n = 0; n < 16; n++) {
+        snprintf(&(out[n*2]), 16*2, "%02x", (unsigned int)digest[n]);
+    }
+
+    return out;
+}
+
 /* thread routine */
 void * thread(void * vargp) {
     int connfd = *((int *)vargp);
@@ -92,7 +145,8 @@ void * thread(void * vargp) {
     pthread_detach(pthread_self());
     free(vargp);
     // Process the header to get details of request
-    size_t n;
+    size_t n, m;
+    int i, found;
     int keepalive = 0; /* Denotes if the current request is persistent */
     int first = 1; /* Denotes if this is the first execution of the while loop */
     int msgsz; /* Size of data read from the file */
@@ -109,6 +163,8 @@ void * thread(void * vargp) {
     char *httpver; /* Incoming HTTP version */
     char *contType; /* Content type of the data being returned */
     char *postdata; /* Postdata to be appended to the request */
+    char *url = (char*) malloc (100*sizeof(char));
+    char *fpath;
     char c;
     FILE *fp; /* File descriptor to open the file */
     while (keepalive || first) {
@@ -125,7 +181,8 @@ void * thread(void * vargp) {
             httpver = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
-
+            strcpy(url, host);
+            strcat(url, tgtpath);
             // Based on the incoming header data, decide if the connection must be persistent or not.
             if (strcmp(httpver, "HTTP/1.1") == 0) {
                 c = context[1];
@@ -151,8 +208,31 @@ void * thread(void * vargp) {
                     sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                     write(connfd, resp, strlen(resp));
                 } else {
-                    write(sendfd, buf1, sizeof(buf1));
-                    read(sendfd, resp, MAXBUF);
+                    fpath = checkCache(url);
+                    if (strcmp(fpath, "") == 0) {
+                        write(sendfd, buf1, sizeof(buf1));
+                        bzero(resp, MAXBUF);
+                        m = read(sendfd, resp, MAXBUF);
+                        if (m < 0) {
+                            printf("No response from server\n");
+                            sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
+                            sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
+                        } else {
+                            printf("Store to cache\n");
+                            found = 0;
+                            for (i = 0; i < cacheLen; i++) {
+                                if(strcmp(url, cacheList[i][0]) == 0) {
+                                    //cacheList[i][2] = New time
+                                    found = 1;
+                                }
+                            }
+                            if (!found) {
+                                strcpy(cacheList[cacheLen][0], url);
+                            }
+                        }
+                    } else {
+                        printf("Read from cached file\n");
+                    }
                     write(connfd, resp, strlen(resp));
                 }
             } else {
@@ -222,6 +302,14 @@ int open_sendfd(int port, char *host) {
 
     /* Create a socket descriptor */
     if ((sendfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        return -1;
+    
+    /* Sets a timeout of 10 secs. */
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+    if (setsockopt(sendfd, SOL_SOCKET, SO_RCVTIMEO,
+                    (struct timeval *)&tv,sizeof(struct timeval)) < 0)
         return -1;
     hostip = hostname_to_ip(host);
     if (strcmp(hostip, "error") == 0)
