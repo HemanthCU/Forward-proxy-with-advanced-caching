@@ -24,7 +24,7 @@ int open_listenfd(int port);
 int open_sendfd(int port, char *host);
 void echo(int connfd);
 void *thread(void *vargp);
-char* getContentType(char *tgtpath);
+char* getFType(char *tgtpath);
 char* hostname_to_ip(char *hostname);
 char* checkCache(char *url);
 char* str2md5(const char *str, int length);
@@ -63,14 +63,13 @@ int main(int argc, char **argv) {
 }
 
 /* 
- * getContentType - gets the content type that needs to be added to HTTP response
+ * getFType - gets the File type that needs to be added to HTTP response
  * Returns NULL in case of failure 
  */
-char* getContentType(char *tgtpath) {
+char* getFType(char *tgtpath) {
     char *temp1 = (char*) malloc (100*sizeof(char));
     char *temp2 = (char*) malloc (100*sizeof(char));
     char *temp3 = NULL;
-    char *temp4 = (char*) malloc (100*sizeof(char));
     strcpy(temp1, tgtpath);
     temp3 = strrchr(temp1, '.');
     if (temp3 == NULL) {
@@ -78,27 +77,8 @@ char* getContentType(char *tgtpath) {
         return NULL;
     }
     temp2 = temp3 + 1;
-    if (strcmp(temp2, "html") == 0) {
-        strcpy(temp4, "text/html");
-    } else if (strcmp(temp2, "txt") == 0) {
-        strcpy(temp4, "text/plain");
-    } else if (strcmp(temp2, "png") == 0) {
-        strcpy(temp4, "image/png");
-    } else if (strcmp(temp2, "gif") == 0) {
-        strcpy(temp4, "image/gif");
-    } else if (strcmp(temp2, "jpg") == 0) {
-        strcpy(temp4, "image/jpg");
-    } else if (strcmp(temp2, "ico") == 0) {
-        strcpy(temp4, "image/x-icon");
-    } else if (strcmp(temp2, "css") == 0) {
-        strcpy(temp4, "text/css");
-    } else if (strcmp(temp2, "js") == 0) {
-        strcpy(temp4, "application/javascript");
-    } else {
-        temp4 = NULL;
-    }
 
-    return temp4;
+    return temp2;
 }
 
 char* checkCache(char *url) {
@@ -152,19 +132,19 @@ void * thread(void * vargp) {
     int msgsz; /* Size of data read from the file */
     char buf[MAXLINE]; /* Request full message */
     char buf1[MAXLINE]; /* Request full message */
-    char *resp = (char*) malloc (MAXBUF*sizeof(char)); /* Response header */
+    char *resp = (char*) malloc (MAXREAD*sizeof(char)); /* Response header */
     unsigned char *msg = (char*) malloc (MAXREAD*sizeof(char)); /* Data read from the file */
     char *context = NULL; /* Pointer used for string tokenizer */
     char *comd; /* Incoming HTTP command */
     char *host; /* Incoming HTTP host */
     char *temp = NULL; /* Temporary pointer to check if connection is persistent */
     char *tgtpath; /* Incoming HTTP URL */
-    char *tgtpath1 = (char*) malloc (100*sizeof(char)); /* Path to the file referenced by URL */
+    char *fname1 = (char*) malloc (100*sizeof(char)); /* Path to the file referenced by URL */
     char *httpver; /* Incoming HTTP version */
     char *contType; /* Content type of the data being returned */
     char *postdata; /* Postdata to be appended to the request */
-    char *url = (char*) malloc (100*sizeof(char));
     char *fpath;
+    char *fname = (char*) malloc (100*sizeof(char));
     char c;
     FILE *fp; /* File descriptor to open the file */
     while (keepalive || first) {
@@ -173,18 +153,17 @@ void * thread(void * vargp) {
         else
             first = 0;
         n = read(connfd, buf, MAXLINE);
-        memcpy(buf1, buf, sizeof(buf));
-        if ((int)n >= 0) {
+        memcpy(buf1, buf, n);
+        if ((int)n >= 0 && buf != NULL && strcmp(buf, "") != 0) {
             printf("Request received\n");
+            //printf("%s\n", buf);
             comd = strtok_r(buf, " \t\r\n\v\f", &context);
             tgtpath = strtok_r(NULL, " \t\r\n\v\f", &context);
             httpver = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
-            strcpy(url, host);
-            strcat(url, tgtpath);
             // Based on the incoming header data, decide if the connection must be persistent or not.
-            if (strcmp(httpver, "HTTP/1.1") == 0) {
+            /*if (strcmp(httpver, "HTTP/1.1") == 0) {
                 c = context[1];
                 if (c != '\r') {
                     temp = strtok_r(NULL, " \t\r\n\v\f", &context);
@@ -197,7 +176,7 @@ void * thread(void * vargp) {
                 } else {
                     keepalive = 1;
                 }
-            }
+            }*/
             printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath, httpver, host, keepalive);
             // Choose what to perform based on comd
             if (strcmp(comd, "GET") == 0) {
@@ -208,32 +187,48 @@ void * thread(void * vargp) {
                     sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                     write(connfd, resp, strlen(resp));
                 } else {
-                    fpath = checkCache(url);
-                    if (strcmp(fpath, "") == 0) {
-                        write(sendfd, buf1, sizeof(buf1));
+                    fpath = checkCache(tgtpath);
+                    if (strcmp(fpath, "") == 0 /*|| strcmp("html", getFType(tgtpath)) != 0*/) {
+                        write(sendfd, buf1, n);
                         bzero(resp, MAXBUF);
-                        m = read(sendfd, resp, MAXBUF);
+                        m = read(sendfd, resp, MAXREAD);
+                        //printf("%s\n", resp);
                         if (m < 0) {
                             printf("No response from server\n");
                             sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
                             sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
-                        } else {
+                        } else if (1 || strcmp("html", getFType(tgtpath)) == 0) {
                             printf("Store to cache\n");
                             found = 0;
                             for (i = 0; i < cacheLen; i++) {
-                                if(strcmp(url, cacheList[i][0]) == 0) {
+                                if(strcmp(tgtpath, cacheList[i][0]) == 0) {
                                     //cacheList[i][2] = New time
                                     found = 1;
                                 }
                             }
                             if (!found) {
-                                strcpy(cacheList[cacheLen][0], url);
+                                strcpy(cacheList[cacheLen][0], tgtpath);
+                                sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
+                                strcpy(cacheList[cacheLen][1], fname);
+                                sprintf(fname1, "./cached/%s", fname);
+                                //printf("m = %d\n", (int)m);
+                                fp = fopen(fname1, "wb+");
+                                fseek(fp, 0, SEEK_SET);
+                                fwrite(resp, 1, m, fp);
+                                fclose(fp);
+                                cacheLen++;
                             }
                         }
                     } else {
                         printf("Read from cached file\n");
+                        //printf("%s\n", fpath);
+                        sprintf(fname1, "./cached/%s", fpath);
+                        fp = fopen(fname1, "rb+");
+                        fseek(fp, 0, SEEK_SET);
+                        m = fread(resp, 1, MAXREAD, fp);
+                        fclose(fp);
                     }
-                    write(connfd, resp, strlen(resp));
+                    write(connfd, resp, m);
                 }
             } else {
                 // Process Internal Server errors like HTTP commands that are not supported
@@ -248,6 +243,7 @@ void * thread(void * vargp) {
     }
     printf("Closing thread\n");
     close(connfd);
+    close(sendfd);
     return NULL;
 }
 
