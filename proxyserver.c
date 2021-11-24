@@ -144,7 +144,7 @@ void * thread(void * vargp) {
     free(vargp);
 
     size_t n, m;
-    int i, j, found;
+    int i, j, f, found;
     int keepalive = 0;
     int first = 1;
     int msgsz;
@@ -213,49 +213,65 @@ void * thread(void * vargp) {
                     if (strcmp(fpath, "") == 0) {
                         write(sendfd, buf1, n);
                         bzero(resp, MAXREAD);
-                        m = read(sendfd, resp, MAXREAD);
-                        if ((int)m < 0) {
-                            printf("No response from server\n");
-                            sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
-                            sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
-                            m = strlen(resp);
-                            write(connfd, resp, m);
-                        } else {
-                            write(connfd, resp, m);
-                            printf("Store to cache ");
-                            found = 0;
-                            for (i = 0; i < cacheLen && found == 0; i++) {
-                                if(strcmp(tgtpath, cacheList[i][0]) == 0) {
-                                    printf("Update Existing %s\n", tgtpath);
+                        m = 1;
+                        f = 1;
+                        while ((int)m > 0) {
+                            m = read(sendfd, resp, MAXREAD);
+                            if ((int)m < 0) {
+                                printf("No response from server\n");
+                                sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
+                                sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
+                                m = strlen(resp);
+                                write(connfd, resp, m);
+                                m = -1;
+                            } else if ((int)m == 0) {
+                                printf("EOF\n");
+                                write(connfd, resp, m);
+                            } else {
+                                write(connfd, resp, m);
+                                printf("Store to cache ");
+                                found = 0;
+                                for (i = 0; i < cacheLen && found == 0; i++) {
+                                    if(strcmp(tgtpath, cacheList[i][0]) == 0) {
+                                        printf("Update Existing %s\n", tgtpath);
+                                        time_t rawtime;
+                                        time(&rawtime);
+                                        sprintf(cacheList[i][2], "%ld", rawtime);
+                                        sprintf(fname1, "./cached/%s", cacheList[i][1]);
+                                        if (f) {
+                                            fp = fopen(fname1, "wb+");
+                                            f = 0;
+                                        } else {
+                                            fp = fopen(fname1, "ab+");
+                                        }
+                                        fwrite(resp, 1, m, fp);
+                                        fclose(fp);
+                                        found = 1;
+                                    }
+                                }
+                                if (!found) {
+                                    printf("New %s\n", tgtpath);
+                                    strcpy(cacheList[cacheLen][0], tgtpath);
+                                    sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
+                                    strcpy(cacheList[cacheLen][1], fname);
+                                    sprintf(fname1, "./cached/%s", fname);
                                     time_t rawtime;
                                     time(&rawtime);
                                     sprintf(cacheList[i][2], "%ld", rawtime);
-                                    sprintf(fname1, "./cached/%s", cacheList[i][1]);
-                                    fp = fopen(fname1, "wb+");
-                                    fseek(fp, 0, SEEK_SET);
+                                    if (f) {
+                                        fp = fopen(fname1, "wb+");
+                                        f = 0;
+                                    } else {
+                                        fp = fopen(fname1, "ab+");
+                                    }
                                     fwrite(resp, 1, m, fp);
                                     fclose(fp);
-                                    found = 1;
+                                    cacheLen++;
                                 }
-                            }
-                            if (!found) {
-                                printf("New %s\n", tgtpath);
-                                strcpy(cacheList[cacheLen][0], tgtpath);
-                                sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
-                                strcpy(cacheList[cacheLen][1], fname);
-                                sprintf(fname1, "./cached/%s", fname);
-                                time_t rawtime;
-                                time(&rawtime);
-                                sprintf(cacheList[i][2], "%ld", rawtime);
-                                fp = fopen(fname1, "wb+");
-                                fseek(fp, 0, SEEK_SET);
-                                fwrite(resp, 1, m, fp);
-                                fclose(fp);
-                                cacheLen++;
-                            }
-                            //Link Prefetching
-                            if (strcmp("html", getFType(tgtpath)) == 0) {
-                                lpf = 1;
+                                //Link Prefetching
+                                if (strcmp("html", getFType(tgtpath)) == 0) {
+                                    lpf = 1;
+                                }
                             }
                         }
                     } else {
@@ -330,7 +346,7 @@ void * threadlpf(void * vargp) {
     free(vargp);
 
     size_t n, m;
-    int i, j, found, sendfd;
+    int i, j, f, found, sendfd;
     int keepalive = 0;
     int first = 1;
     int msgsz;
@@ -368,41 +384,57 @@ void * threadlpf(void * vargp) {
     if (sendfd >= 0) {
         write(sendfd, buf, strlen(buf));
         bzero(resp, MAXREAD);
-        m = read(sendfd, resp, MAXREAD);
-        if ((int)m >= 0) {
-            printf("LPF Store to cache %s\n", tgtpath);
-            pthread_mutex_lock(&mtx);
-            found = 0;
-            for (i = 0; i < cacheLen && found == 0; i++) {
-                if(strcmp(tgtpath, cacheList[i][0]) == 0) {
+        m = 1;
+        f = 1;
+        while((int)m > 0) {
+            m = read(sendfd, resp, MAXREAD);
+            if ((int)m > 0) {
+                printf("LPF Store to cache %s\n", tgtpath);
+                pthread_mutex_lock(&mtx);
+                found = 0;
+                for (i = 0; i < cacheLen && found == 0; i++) {
+                    if(strcmp(tgtpath, cacheList[i][0]) == 0) {
+                        time_t rawtime;
+                        time(&rawtime);
+                        sprintf(cacheList[i][2], "%ld", rawtime);
+                        sprintf(fname1, "./cached/%s", cacheList[i][1]);
+                        if (f) {
+                            fp = fopen(fname1, "wb+");
+                            f = 0;
+                        } else {
+                            fp = fopen(fname1, "ab+");
+                        }
+                        fseek(fp, 0, SEEK_SET);
+                        fwrite(resp, 1, m, fp);
+                        fclose(fp);
+                        found = 1;
+                    }
+                }
+                if (!found) {
+                    strcpy(cacheList[cacheLen][0], tgtpath);
+                    sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
+                    strcpy(cacheList[cacheLen][1], fname);
+                    sprintf(fname1, "./cached/%s", fname);
                     time_t rawtime;
                     time(&rawtime);
                     sprintf(cacheList[i][2], "%ld", rawtime);
-                    sprintf(fname1, "./cached/%s", cacheList[i][1]);
-                    fp = fopen(fname1, "wb+");
+                    if (f) {
+                        fp = fopen(fname1, "wb+");
+                        f = 0;
+                    } else {
+                        fp = fopen(fname1, "ab+");
+                    }
                     fseek(fp, 0, SEEK_SET);
                     fwrite(resp, 1, m, fp);
                     fclose(fp);
-                    found = 1;
+                    cacheLen++;
                 }
+                pthread_mutex_unlock(&mtx);
+            } else if ((int)m == 0) {
+                printf("LPF EOF\n");
+            } else {
+                printf("LPF m < 0 %s\n", tgtpath);
             }
-            if (!found) {
-                strcpy(cacheList[cacheLen][0], tgtpath);
-                sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
-                strcpy(cacheList[cacheLen][1], fname);
-                sprintf(fname1, "./cached/%s", fname);
-                time_t rawtime;
-                time(&rawtime);
-                sprintf(cacheList[i][2], "%ld", rawtime);
-                fp = fopen(fname1, "wb+");
-                fseek(fp, 0, SEEK_SET);
-                fwrite(resp, 1, m, fp);
-                fclose(fp);
-                cacheLen++;
-            }
-            pthread_mutex_unlock(&mtx);
-        } else {
-            printf("LPF m < 0 %s\n", tgtpath);
         }
     }
     close(sendfd);
