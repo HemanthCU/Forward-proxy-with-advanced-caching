@@ -14,8 +14,6 @@
 #include <pthread.h>
 #include <openssl/md5.h>
 
-#define MAXLINE  8192  /* max text line length */
-#define MAXBUF   8192  /* max I/O buffer size */
 #define LISTENQ  1024  /* second argument to listen() */
 #define MAXREAD  80000
 #define HOSTLEN  100
@@ -67,6 +65,7 @@ int main(int argc, char **argv) {
  * Returns NULL in case of failure 
  */
 char* getFType(char *tgtpath) {
+    int i;
     char *temp1 = (char*) malloc (100*sizeof(char));
     char *temp2 = (char*) malloc (100*sizeof(char));
     char *temp3 = NULL;
@@ -77,7 +76,10 @@ char* getFType(char *tgtpath) {
         return NULL;
     }
     temp2 = temp3 + 1;
-
+    for (i = 0; i < strlen(temp2); i++) {
+        if (!(temp2[i] >= 'a' && temp2[i] <= 'z') && !(temp2[i] >= 'A' && temp2[i] <= 'Z'))
+            return "html";
+    }
     return temp2;
 }
 
@@ -126,12 +128,12 @@ void * thread(void * vargp) {
     free(vargp);
     // Process the header to get details of request
     size_t n, m;
-    int i, found;
+    int i, j, found;
     int keepalive = 0; /* Denotes if the current request is persistent */
     int first = 1; /* Denotes if this is the first execution of the while loop */
     int msgsz; /* Size of data read from the file */
-    char buf[MAXLINE]; /* Request full message */
-    char buf1[MAXLINE]; /* Request full message */
+    char buf[MAXREAD]; /* Request full message */
+    char buf1[MAXREAD]; /* Request full message */
     char *resp = (char*) malloc (MAXREAD*sizeof(char)); /* Response header */
     unsigned char *msg = (char*) malloc (MAXREAD*sizeof(char)); /* Data read from the file */
     char *context = NULL; /* Pointer used for string tokenizer */
@@ -147,15 +149,24 @@ void * thread(void * vargp) {
     char *fname = (char*) malloc (100*sizeof(char));
     char c;
     FILE *fp; /* File descriptor to open the file */
+
+    int lpf = 0;
+    char *lpftok;
+    char *contextlpf = NULL;
+    char *hreflpf = (char*) malloc (100*sizeof(char));
+    char *linklpf;
+    char *contextlinklpf = NULL;
+    char d;
+
     while (keepalive || first) {
         if (!first)
             printf("Waiting for incoming request\n");
         else
             first = 0;
-        n = read(connfd, buf, MAXLINE);
-        memcpy(buf1, buf, n);
-        if ((int)n >= 0 && buf != NULL && strcmp(buf, "") != 0) {
+        n = read(connfd, buf, MAXREAD);
+        if ((int)n >= 0 && buf != NULL && strcmp(buf, "") != 0 && strcmp(buf, "GET") != 0 && strcmp(buf, "CONNECT") != 0) {
             printf("Request received\n");
+            memcpy(buf1, buf, n);
             //printf("%s\n", buf);
             comd = strtok_r(buf, " \t\r\n\v\f", &context);
             tgtpath = strtok_r(NULL, " \t\r\n\v\f", &context);
@@ -163,7 +174,7 @@ void * thread(void * vargp) {
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
             // Based on the incoming header data, decide if the connection must be persistent or not.
-            /*if (strcmp(httpver, "HTTP/1.1") == 0) {
+            if (strcmp(httpver, "HTTP/1.1") == 0) {
                 c = context[1];
                 if (c != '\r') {
                     temp = strtok_r(NULL, " \t\r\n\v\f", &context);
@@ -176,7 +187,7 @@ void * thread(void * vargp) {
                 } else {
                     keepalive = 1;
                 }
-            }*/
+            }
             printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath, httpver, host, keepalive);
             // Choose what to perform based on comd
             if (strcmp(comd, "GET") == 0) {
@@ -188,21 +199,28 @@ void * thread(void * vargp) {
                     write(connfd, resp, strlen(resp));
                 } else {
                     fpath = checkCache(tgtpath);
-                    if (strcmp(fpath, "") == 0 /*|| strcmp("html", getFType(tgtpath)) != 0*/) {
+                    lpf = 0;
+                    if (strcmp(fpath, "") == 0) {
                         write(sendfd, buf1, n);
-                        bzero(resp, MAXBUF);
+                        bzero(resp, MAXREAD);
                         m = read(sendfd, resp, MAXREAD);
                         //printf("%s\n", resp);
                         if (m < 0) {
                             printf("No response from server\n");
                             sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
                             sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
-                        } else if (1 || strcmp("html", getFType(tgtpath)) == 0) {
+                            m = strlen(resp);
+                        } else {
                             printf("Store to cache\n");
                             found = 0;
-                            for (i = 0; i < cacheLen; i++) {
+                            for (i = 0; i < cacheLen && found == 0; i++) {
                                 if(strcmp(tgtpath, cacheList[i][0]) == 0) {
                                     //cacheList[i][2] = New time
+                                    sprintf(fname1, "./cached/%s", cacheList[i][1]);
+                                    fp = fopen(fname1, "wb+");
+                                    fseek(fp, 0, SEEK_SET);
+                                    fwrite(resp, 1, m, fp);
+                                    fclose(fp);
                                     found = 1;
                                 }
                             }
@@ -218,6 +236,11 @@ void * thread(void * vargp) {
                                 fclose(fp);
                                 cacheLen++;
                             }
+
+                            //Link Prefetching
+                            if (strcmp("html", getFType(tgtpath)) == 0) {
+                                lpf = 1;
+                            }
                         }
                     } else {
                         printf("Read from cached file\n");
@@ -229,6 +252,28 @@ void * thread(void * vargp) {
                         fclose(fp);
                     }
                     write(connfd, resp, m);
+                    if (lpf) {
+                        lpftok = strtok_r(resp, "<", &contextlpf);
+                        while(lpftok) {
+                            if (lpftok[0] == 'a'){
+                                j = 0;
+                                while (j < strlen(lpftok) - 6) {
+                                    if (lpftok[j] == 'h' && lpftok[j + 1] == 'r' && lpftok[j + 2] == 'e' && lpftok[j + 3] == 'f' && lpftok[j + 4] == '=' && lpftok[j + 5] == '\"') {
+                                        strcpy(hreflpf, lpftok + j);
+                                        //printf("%s\n", hreflpf);
+                                        linklpf = strtok_r(hreflpf, "\"", &contextlinklpf);
+                                        linklpf = strtok_r(NULL, "\"", &contextlinklpf);
+                                        if (linklpf != NULL) {
+                                            //printf("%s\n\n", linklpf);
+
+                                        }
+                                    }
+                                    j++;
+                                }
+                            }
+                            lpftok = strtok_r(NULL, "<", &contextlpf);
+                        }
+                    }
                 }
             } else {
                 // Process Internal Server errors like HTTP commands that are not supported
@@ -236,6 +281,7 @@ void * thread(void * vargp) {
                 sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                 write(connfd, resp, strlen(resp));
             }
+            close(sendfd);
         } else {
             printf("No data received\n");
             keepalive = 0;
@@ -243,7 +289,6 @@ void * thread(void * vargp) {
     }
     printf("Closing thread\n");
     close(connfd);
-    close(sendfd);
     return NULL;
 }
 
