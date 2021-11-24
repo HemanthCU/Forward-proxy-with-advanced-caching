@@ -342,6 +342,7 @@ void * threadlpf(void * vargp) {
     char *fpath;
     char *fname = (char*) malloc (100*sizeof(char));
     char *fname1 = (char*) malloc (100*sizeof(char));
+    char *myfname1 = (char*) malloc (100*sizeof(char));
     char c;
     FILE *fp;
 
@@ -359,9 +360,10 @@ void * threadlpf(void * vargp) {
         host = strtok_r(NULL, "/", &contexthost);
     } else {
         sprintf(tgtpath, "http://%s/%s", host, myfname);
+        sprintf(myfname1, "/%s", myfname);
     }
 
-    sprintf(buf, "GET %s HTTP/1.0\r\n\r\n", myfname);
+    sprintf(buf, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", myfname1, host);
     sendfd = open_sendfd(80, host);
     if (sendfd >= 0) {
         write(sendfd, buf, strlen(buf));
