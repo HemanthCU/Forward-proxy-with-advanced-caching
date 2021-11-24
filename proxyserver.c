@@ -1,5 +1,5 @@
 /* 
- * proxyserver.c - A server to handle different HTTP requests to load a website
+ * proxyserver.c - A program to implement a forward proxy with caching and link prefetching
  */
 
 #include <stdio.h>
@@ -14,7 +14,7 @@
 #include <pthread.h>
 #include <openssl/md5.h>
 
-#define LISTENQ  1024  /* second argument to listen() */
+#define LISTENQ  1024
 #define MAXREAD  80000
 #define HOSTLEN  100
 
@@ -34,29 +34,39 @@ struct lpfwrapper {
 };
 
 char ***cacheList;
+char ***ipcache;
 int cacheLen;
-int timelimit = 60;
+int ipcacheLen;
+int timelimit = 600;
 pthread_mutex_t mtx=PTHREAD_MUTEX_INITIALIZER;
 
 int main(int argc, char **argv) {
     int i, j, listenfd, *connfdp, port, clientlen=sizeof(struct sockaddr_in);
     cacheList = (char***) malloc (400 * sizeof(char**));
+    ipcache = (char***) malloc (400 * sizeof(char**));
     for (i = 0; i < 400; i++) {
         cacheList[i] = (char**) malloc (3 * sizeof(char*));
+        ipcache[i] = (char**) malloc (2 * sizeof(char*));
         for (j = 0; j < 3; j++) {
             cacheList[i][j] = (char*) malloc (HOSTLEN * sizeof(char));
             bzero(cacheList[i][j], HOSTLEN);
         }
+        for (j = 0; j < 2; j++) {
+            ipcache[i][j] = (char*) malloc (HOSTLEN * sizeof(char));
+            bzero(ipcache[i][j], HOSTLEN);
+        }
     }
     cacheLen = 0;
+    ipcacheLen = 0;
     struct sockaddr_in clientaddr;
     pthread_t tid; 
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s <port> <timeout>\n", argv[0]);
         exit(0);
     }
     port = atoi(argv[1]);
+    timelimit = atoi(argv[2]);
 
     listenfd = open_listenfd(port);
     while (1) {
@@ -68,10 +78,6 @@ int main(int argc, char **argv) {
     }
 }
 
-/* 
- * getFType - gets the File type that needs to be added to HTTP response
- * Returns NULL in case of failure 
- */
 char* getFType(char *tgtpath) {
     int i;
     char *temp1 = (char*) malloc (100*sizeof(char));
@@ -131,37 +137,36 @@ char* str2md5(const char *str, int length) {
     return out;
 }
 
-/* thread routine */
 void * thread(void * vargp) {
     int connfd = *((int *)vargp);
     int sendfd;
     pthread_detach(pthread_self());
     free(vargp);
-    // Process the header to get details of request
+
     size_t n, m;
     int i, j, found;
-    int keepalive = 0; /* Denotes if the current request is persistent */
-    int first = 1; /* Denotes if this is the first execution of the while loop */
-    int msgsz; /* Size of data read from the file */
-    char buf[MAXREAD]; /* Request full message */
-    char buf1[MAXREAD]; /* Request full message */
-    unsigned char *resp = (char*) malloc (MAXREAD*sizeof(char)); /* Response header */
-    unsigned char *msg = (char*) malloc (MAXREAD*sizeof(char)); /* Data read from the file */
-    char *context = NULL; /* Pointer used for string tokenizer */
-    char *comd; /* Incoming HTTP command */
-    char *host; /* Incoming HTTP host */
-    char *temp = NULL; /* Temporary pointer to check if connection is persistent */
-    char *tgtpath; /* Incoming HTTP URL */
-    char *fname1 = (char*) malloc (100*sizeof(char)); /* Path to the file referenced by URL */
-    char *httpver; /* Incoming HTTP version */
-    char *contType; /* Content type of the data being returned */
-    char *postdata; /* Postdata to be appended to the request */
+    int keepalive = 0;
+    int first = 1;
+    int msgsz;
+    char buf[MAXREAD];
+    char buf1[MAXREAD];
+    unsigned char *resp = (char*) malloc (MAXREAD*sizeof(char));
+    unsigned char *msg = (char*) malloc (MAXREAD*sizeof(char));
+    char *context = NULL;
+    char *comd;
+    char *host;
+    char *temp = NULL;
+    char *tgtpath;
+    char *fname1 = (char*) malloc (100*sizeof(char));
+    char *httpver;
+    char *contType;
+    char *postdata;
     char *fpath;
     char *fname = (char*) malloc (100*sizeof(char));
     char *myfname = (char*) malloc (100*sizeof(char));
     char *contexthost = NULL;
     char c;
-    FILE *fp; /* File descriptor to open the file */
+    FILE *fp;
 
     int lpf = 0;
 
@@ -174,34 +179,17 @@ void * thread(void * vargp) {
         if ((int)n >= 0 && buf != NULL && strcmp(buf, "") != 0 && strcmp(buf, "GET") != 0 && strcmp(buf, "CONNECT") != 0) {
             printf("Request received\n");
             memcpy(buf1, buf, MAXREAD);
-            //printf("%s\n", buf);
             comd = strtok_r(buf, " \t\r\n\v\f", &context);
             tgtpath = strtok_r(NULL, " \t\r\n\v\f", &context);
             httpver = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
-            // Based on the incoming header data, decide if the connection must be persistent or not.
-            /*if (strcmp(httpver, "HTTP/1.1") == 0) {
-                c = context[1];
-                if (c != '\r') {
-                    temp = strtok_r(NULL, " \t\r\n\v\f", &context);
-                    temp = strtok_r(NULL, " \t\r\n\v\f", &context);
-                    if (strcmp(temp, "Keep-alive") == 0 || strcmp(temp, "keep-alive") == 0) {
-                        keepalive = 1;
-                    } else {
-                        keepalive = 0;
-                    }
-                } else {
-                    keepalive = 1;
-                }
-            }*/
             if (host == NULL) {
                 strcpy(myfname, tgtpath);
                 host = strtok_r(myfname, "/", &contexthost);
                 host = strtok_r(NULL, "/", &contexthost);
             }
-            printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath, httpver, host, keepalive);
-            // Choose what to perform based on comd
+            //printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath, httpver, host, keepalive);
             if (strcmp(comd, "GET") == 0) {
                 sendfd = open_sendfd(80, host);
                 if (sendfd < 0) {
@@ -219,7 +207,6 @@ void * thread(void * vargp) {
                         bzero(resp, MAXREAD);
                         m = read(sendfd, resp, MAXREAD);
                         write(connfd, resp, m);
-                        //printf("%s\n", resp);
                         if (m < 0) {
                             printf("No response from server\n");
                             sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
@@ -264,7 +251,6 @@ void * thread(void * vargp) {
                         }
                     } else {
                         printf("Read from cached file %s\n", tgtpath);
-                        //printf("%s\n", fpath);
                         sprintf(fname1, "./cached/%s", fpath);
                         fp = fopen(fname1, "rb+");
                         fseek(fp, 0, SEEK_SET);
@@ -273,7 +259,6 @@ void * thread(void * vargp) {
                         write(connfd, resp, m);
                     }
                     close(sendfd);
-                    //printf("cacheLen = %d\n", cacheLen);
                     pthread_mutex_unlock(&mtx);
 
                     //Link Prefetching
@@ -283,10 +268,8 @@ void * thread(void * vargp) {
                     char *linklpf;
                     char *contextlinklpf = NULL;
                     if (lpf) {
-                        //printf("%s\n", resp);
                         lpftok = strtok_r(resp, "<", &contextlpf);
                         while(lpftok != NULL) {
-                            //printf("lpftok = %s\n", lpftok);
                             if (lpftok[0] == 'a'){
                                 j = 0;
                                 while (j < strlen(lpftok) - 8) {
@@ -314,7 +297,6 @@ void * thread(void * vargp) {
                     }
                 }
             } else {
-                // Process Internal Server errors like HTTP commands that are not supported
                 sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
                 sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                 write(connfd, resp, strlen(resp));
@@ -340,10 +322,10 @@ void * threadlpf(void * vargp) {
 
     size_t n, m;
     int i, j, found, sendfd;
-    int keepalive = 0; /* Denotes if the current request is persistent */
-    int first = 1; /* Denotes if this is the first execution of the while loop */
-    int msgsz; /* Size of data read from the file */
-    char buf[MAXREAD]; /* Request full message */
+    int keepalive = 0;
+    int first = 1;
+    int msgsz;
+    char buf[MAXREAD];
     char *tgtpath = (char*) malloc (100*sizeof(char));
     char *hosttok;
     char *contexthost = NULL;
@@ -352,7 +334,7 @@ void * threadlpf(void * vargp) {
     char *fname = (char*) malloc (100*sizeof(char));
     char *fname1 = (char*) malloc (100*sizeof(char));
     char c;
-    FILE *fp; /* File descriptor to open the file */
+    FILE *fp;
 
 
     if (strlen(myfname) < 4) {
@@ -366,10 +348,8 @@ void * threadlpf(void * vargp) {
     } else {
         sprintf(tgtpath, "http://%s/%s", host, myfname);
     }
-    //printf("newthread %s %s\n", tgtpath, host);
 
     sprintf(buf, "GET %s HTTP/1.1", tgtpath);
-    printf("LPF %s\n", buf);
     sendfd = open_sendfd(80, host);
     if (sendfd >= 0) {
         write(sendfd, buf, strlen(buf));
@@ -406,7 +386,6 @@ void * threadlpf(void * vargp) {
                 fclose(fp);
                 cacheLen++;
             }
-            //printf("cacheLen = %d\n", cacheLen);
             pthread_mutex_unlock(&mtx);
         }
     }
@@ -492,6 +471,12 @@ char* hostname_to_ip(char *hostname) {
     char *ip = (char*) malloc (20 * sizeof(char));
     int i;
 
+    for (i = 0; i < ipcacheLen; i++) {
+        if (strcmp(ipcache[i][0], hostname) == 0) {
+            return ipcache[i][1];
+        }
+    }
+
     if ((he = gethostbyname( hostname)) == NULL) {
         // get the host info
         herror("gethostbyname");
@@ -502,9 +487,15 @@ char* hostname_to_ip(char *hostname) {
 
     for (i = 0; addr_list[i] != NULL; i++) {
         //Return the first one;
-        strcpy(ip , inet_ntoa(*addr_list[i]) );
+        strcpy(ip , inet_ntoa(*addr_list[i]));
+        strcpy(ipcache[ipcacheLen][0], hostname);
+        strcpy(ipcache[ipcacheLen][1], ip);
+        ipcacheLen++;
         return ip;
     }
 
+    strcpy(ipcache[ipcacheLen][0], hostname);
+    strcpy(ipcache[ipcacheLen][1], ip);
+    ipcacheLen++;
     return ip;
 }
