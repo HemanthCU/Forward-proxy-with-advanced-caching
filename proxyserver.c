@@ -103,7 +103,7 @@ char* checkCache(char *url) {
         time_t rawtime;
         time(&rawtime);
         if(strcmp(url, cacheList[i][0]) == 0 && (rawtime - atol(cacheList[i][2]) < timelimit)) {
-            printf("%ld %ld %ld\n", rawtime - atol(cacheList[i][2]), rawtime, atol(cacheList[i][2]));
+            //printf("%ld %ld %ld\n", rawtime - atol(cacheList[i][2]), rawtime, atol(cacheList[i][2]));
             return cacheList[i][1];
         }
     }
@@ -193,9 +193,17 @@ void * thread(void * vargp) {
             if (strcmp(comd, "GET") == 0) {
                 sendfd = open_sendfd(80, host);
                 if (sendfd < 0) {
-                    printf("sendfd < 0\n");
-                    sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
-                    sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
+                    //printf("sendfd < 0 sendfd = %d\n", sendfd);
+                    if (sendfd == -2) {
+                        sprintf(msg, "<html><head><title>404 Not Found</title></head><body><h2>404 Not Found</h2></body></html>");
+                        sprintf(resp, "%s 404 File Not Found\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
+                    } else if (sendfd == -3) {
+                        sprintf(msg, "<html><head><title>ERROR 403 Forbidden</title></head><body><h2>ERROR 403 Forbidden</h2></body></html>");
+                        sprintf(resp, "%s 403 Forbidden\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
+                    } else {
+                        sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
+                        sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
+                    }
                     write(connfd, resp, strlen(resp));
                     close(sendfd);
                 } else {
@@ -206,13 +214,14 @@ void * thread(void * vargp) {
                         write(sendfd, buf1, n);
                         bzero(resp, MAXREAD);
                         m = read(sendfd, resp, MAXREAD);
-                        write(connfd, resp, m);
-                        if (m < 0) {
+                        if ((int)m < 0) {
                             printf("No response from server\n");
                             sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
                             sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                             m = strlen(resp);
+                            write(connfd, resp, m);
                         } else {
+                            write(connfd, resp, m);
                             printf("Store to cache ");
                             found = 0;
                             for (i = 0; i < cacheLen && found == 0; i++) {
@@ -340,6 +349,9 @@ void * threadlpf(void * vargp) {
     if (strlen(myfname) < 4) {
         //DO NOTHING
         return NULL;
+    } else if (myfname[0] == 'h' && myfname[1] == 't' && myfname[2] == 't' && myfname[3] == 'p' && myfname[3] == 's') {
+        printf("Cannot get https link\n");
+        return NULL;
     } else if (myfname[0] == 'h' && myfname[1] == 't' && myfname[2] == 't' && myfname[3] == 'p') {
         strcpy(tgtpath, myfname);
         free(host);
@@ -349,13 +361,13 @@ void * threadlpf(void * vargp) {
         sprintf(tgtpath, "http://%s/%s", host, myfname);
     }
 
-    sprintf(buf, "GET %s HTTP/1.1", tgtpath);
+    sprintf(buf, "GET %s HTTP/1.0\r\n\r\n", myfname);
     sendfd = open_sendfd(80, host);
     if (sendfd >= 0) {
         write(sendfd, buf, strlen(buf));
         bzero(resp, MAXREAD);
         m = read(sendfd, resp, MAXREAD);
-        if (m >= 0) {
+        if ((int)m >= 0) {
             printf("LPF Store to cache %s\n", tgtpath);
             pthread_mutex_lock(&mtx);
             found = 0;
@@ -387,6 +399,8 @@ void * threadlpf(void * vargp) {
                 cacheLen++;
             }
             pthread_mutex_unlock(&mtx);
+        } else {
+            printf("LPF m < 0 %s\n", tgtpath);
         }
     }
     close(sendfd);
@@ -441,6 +455,17 @@ int open_sendfd(int port, char *host) {
     int sendfd;
     struct sockaddr_in serveraddr;
     char *hostip;
+    FILE *fp;
+    char * line = NULL;
+    size_t len = 0;
+    ssize_t read;
+
+    fp = fopen("blacklist.txt", "rb+");
+    while ((read = getline(&line, &len, fp)) != -1) {
+        if (strcmp(host, line) == 0)
+            return -3;
+    }
+    fclose(fp);
 
     /* Create a socket descriptor */
     if ((sendfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
@@ -453,9 +478,10 @@ int open_sendfd(int port, char *host) {
     if (setsockopt(sendfd, SOL_SOCKET, SO_RCVTIMEO,
                     (struct timeval *)&tv,sizeof(struct timeval)) < 0)
         return -1;
+
     hostip = hostname_to_ip(host);
     if (strcmp(hostip, "error") == 0)
-        return -1;
+        return -2;
     bzero((char *) &serveraddr, sizeof(serveraddr));
     serveraddr.sin_family = AF_INET; 
     serveraddr.sin_addr.s_addr = inet_addr(hostip);
@@ -477,7 +503,7 @@ char* hostname_to_ip(char *hostname) {
         }
     }
 
-    if ((he = gethostbyname( hostname)) == NULL) {
+    if ((he = gethostbyname(hostname)) == NULL) {
         // get the host info
         herror("gethostbyname");
         return "error";
