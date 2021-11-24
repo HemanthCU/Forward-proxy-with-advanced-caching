@@ -35,6 +35,7 @@ struct lpfwrapper {
 
 char ***cacheList;
 int cacheLen;
+int timelimit = 60;
 pthread_mutex_t mtx=PTHREAD_MUTEX_INITIALIZER;
 
 int main(int argc, char **argv) {
@@ -93,7 +94,10 @@ char* getFType(char *tgtpath) {
 char* checkCache(char *url) {
     int i;
     for (i = 0; i < cacheLen; i++) {
-        if(strcmp(url, cacheList[i][0]) == 0) {
+        time_t rawtime;
+        time(&rawtime);
+        if(strcmp(url, cacheList[i][0]) == 0 && (rawtime - atol(cacheList[i][2]) < timelimit)) {
+            printf("%ld %ld %ld\n", rawtime - atol(cacheList[i][2]), rawtime, atol(cacheList[i][2]));
             return cacheList[i][1];
         }
     }
@@ -141,7 +145,7 @@ void * thread(void * vargp) {
     int msgsz; /* Size of data read from the file */
     char buf[MAXREAD]; /* Request full message */
     char buf1[MAXREAD]; /* Request full message */
-    char *resp = (char*) malloc (MAXREAD*sizeof(char)); /* Response header */
+    unsigned char *resp = (char*) malloc (MAXREAD*sizeof(char)); /* Response header */
     unsigned char *msg = (char*) malloc (MAXREAD*sizeof(char)); /* Data read from the file */
     char *context = NULL; /* Pointer used for string tokenizer */
     char *comd; /* Incoming HTTP command */
@@ -154,16 +158,12 @@ void * thread(void * vargp) {
     char *postdata; /* Postdata to be appended to the request */
     char *fpath;
     char *fname = (char*) malloc (100*sizeof(char));
+    char *myfname = (char*) malloc (100*sizeof(char));
+    char *contexthost = NULL;
     char c;
     FILE *fp; /* File descriptor to open the file */
 
     int lpf = 0;
-    char *lpftok;
-    char *contextlpf = NULL;
-    char *hreflpf = (char*) malloc (100*sizeof(char));
-    char *linklpf;
-    char *contextlinklpf = NULL;
-    char d;
 
     while (keepalive || first) {
         if (!first)
@@ -173,7 +173,7 @@ void * thread(void * vargp) {
         n = read(connfd, buf, MAXREAD);
         if ((int)n >= 0 && buf != NULL && strcmp(buf, "") != 0 && strcmp(buf, "GET") != 0 && strcmp(buf, "CONNECT") != 0) {
             printf("Request received\n");
-            memcpy(buf1, buf, n);
+            memcpy(buf1, buf, MAXREAD);
             //printf("%s\n", buf);
             comd = strtok_r(buf, " \t\r\n\v\f", &context);
             tgtpath = strtok_r(NULL, " \t\r\n\v\f", &context);
@@ -181,7 +181,7 @@ void * thread(void * vargp) {
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
             host = strtok_r(NULL, " \t\r\n\v\f", &context);
             // Based on the incoming header data, decide if the connection must be persistent or not.
-            if (strcmp(httpver, "HTTP/1.1") == 0) {
+            /*if (strcmp(httpver, "HTTP/1.1") == 0) {
                 c = context[1];
                 if (c != '\r') {
                     temp = strtok_r(NULL, " \t\r\n\v\f", &context);
@@ -194,6 +194,11 @@ void * thread(void * vargp) {
                 } else {
                     keepalive = 1;
                 }
+            }*/
+            if (host == NULL) {
+                strcpy(myfname, tgtpath);
+                host = strtok_r(myfname, "/", &contexthost);
+                host = strtok_r(NULL, "/", &contexthost);
             }
             printf("comd=%s tgtpath=%s httpver=%s host=%s keepalive=%d \n", comd, tgtpath, httpver, host, keepalive);
             // Choose what to perform based on comd
@@ -204,6 +209,7 @@ void * thread(void * vargp) {
                     sprintf(msg, "<html><head><title>400 Bad Request</title></head><body><h2>400 Bad Request</h2></body></html>");
                     sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                     write(connfd, resp, strlen(resp));
+                    close(sendfd);
                 } else {
                     pthread_mutex_lock(&mtx);
                     fpath = checkCache(tgtpath);
@@ -212,6 +218,7 @@ void * thread(void * vargp) {
                         write(sendfd, buf1, n);
                         bzero(resp, MAXREAD);
                         m = read(sendfd, resp, MAXREAD);
+                        write(connfd, resp, m);
                         //printf("%s\n", resp);
                         if (m < 0) {
                             printf("No response from server\n");
@@ -223,8 +230,10 @@ void * thread(void * vargp) {
                             found = 0;
                             for (i = 0; i < cacheLen && found == 0; i++) {
                                 if(strcmp(tgtpath, cacheList[i][0]) == 0) {
-                                    printf("Update Existing\n");
-                                    //cacheList[i][2] = New time
+                                    printf("Update Existing %s\n", tgtpath);
+                                    time_t rawtime;
+                                    time(&rawtime);
+                                    sprintf(cacheList[i][2], "%ld", rawtime);
                                     sprintf(fname1, "./cached/%s", cacheList[i][1]);
                                     fp = fopen(fname1, "wb+");
                                     fseek(fp, 0, SEEK_SET);
@@ -234,12 +243,14 @@ void * thread(void * vargp) {
                                 }
                             }
                             if (!found) {
-                                printf("New\n");
+                                printf("New %s\n", tgtpath);
                                 strcpy(cacheList[cacheLen][0], tgtpath);
                                 sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
                                 strcpy(cacheList[cacheLen][1], fname);
                                 sprintf(fname1, "./cached/%s", fname);
-                                //printf("m = %d\n", (int)m);
+                                time_t rawtime;
+                                time(&rawtime);
+                                sprintf(cacheList[i][2], "%ld", rawtime);
                                 fp = fopen(fname1, "wb+");
                                 fseek(fp, 0, SEEK_SET);
                                 fwrite(resp, 1, m, fp);
@@ -252,39 +263,47 @@ void * thread(void * vargp) {
                             }
                         }
                     } else {
-                        printf("Read from cached file\n");
+                        printf("Read from cached file %s\n", tgtpath);
                         //printf("%s\n", fpath);
                         sprintf(fname1, "./cached/%s", fpath);
                         fp = fopen(fname1, "rb+");
                         fseek(fp, 0, SEEK_SET);
                         m = fread(resp, 1, MAXREAD, fp);
                         fclose(fp);
+                        write(connfd, resp, m);
                     }
+                    close(sendfd);
                     //printf("cacheLen = %d\n", cacheLen);
                     pthread_mutex_unlock(&mtx);
-                    write(connfd, resp, m);
 
                     //Link Prefetching
+                    char *lpftok;
+                    char *contextlpf = NULL;
+                    char *hreflpf = (char*) malloc (100*sizeof(char));
+                    char *linklpf;
+                    char *contextlinklpf = NULL;
                     if (lpf) {
+                        //printf("%s\n", resp);
                         lpftok = strtok_r(resp, "<", &contextlpf);
-                        while(lpftok) {
+                        while(lpftok != NULL) {
+                            //printf("lpftok = %s\n", lpftok);
                             if (lpftok[0] == 'a'){
                                 j = 0;
-                                while (j < strlen(lpftok) - 6) {
+                                while (j < strlen(lpftok) - 8) {
                                     if (lpftok[j] == 'h' && lpftok[j + 1] == 'r' && lpftok[j + 2] == 'e' && lpftok[j + 3] == 'f' && lpftok[j + 4] == '=' && lpftok[j + 5] == '\"') {
-                                        strcpy(hreflpf, lpftok + j);
-                                        //printf("%s\n", hreflpf);
-                                        linklpf = strtok_r(hreflpf, "\"", &contextlinklpf);
-                                        linklpf = strtok_r(NULL, "\"", &contextlinklpf);
-                                        if (linklpf != NULL) {
-                                            //printf("%s\n\n", linklpf);
-                                            pthread_t tidlpf;
-                                            struct lpfwrapper *mywrapper = (struct lpfwrapper*) malloc (sizeof(struct lpfwrapper));
-                                            mywrapper->fname = (char*) malloc (100*sizeof(char));
-                                            mywrapper->hostname = (char*) malloc (100*sizeof(char));
-                                            strcpy(mywrapper->fname, linklpf);
-                                            strcpy(mywrapper->hostname, host);
-                                            pthread_create(&tidlpf, NULL, threadlpf, mywrapper);
+                                        sprintf(hreflpf, "%s", lpftok + j);
+                                        if (strlen(hreflpf) > 6) {
+                                            linklpf = strtok_r(hreflpf, "\"", &contextlinklpf);
+                                            linklpf = strtok_r(NULL, "\"", &contextlinklpf);
+                                            if (linklpf != NULL) {
+                                                pthread_t tidlpf;
+                                                struct lpfwrapper *mywrapper = (struct lpfwrapper*) malloc (sizeof(struct lpfwrapper));
+                                                mywrapper->fname = (char*) malloc (100*sizeof(char));
+                                                mywrapper->hostname = (char*) malloc (100*sizeof(char));
+                                                strcpy(mywrapper->fname, linklpf);
+                                                strcpy(mywrapper->hostname, host);
+                                                pthread_create(&tidlpf, NULL, threadlpf, mywrapper);
+                                            }
                                         }
                                     }
                                     j++;
@@ -300,7 +319,6 @@ void * thread(void * vargp) {
                 sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                 write(connfd, resp, strlen(resp));
             }
-            close(sendfd);
         } else {
             printf("No data received\n");
             keepalive = 0;
@@ -329,7 +347,7 @@ void * threadlpf(void * vargp) {
     char *tgtpath = (char*) malloc (100*sizeof(char));
     char *hosttok;
     char *contexthost = NULL;
-    char *resp = (char*) malloc (MAXREAD*sizeof(char));
+    unsigned char *resp = (char*) malloc (MAXREAD*sizeof(char));
     char *fpath;
     char *fname = (char*) malloc (100*sizeof(char));
     char *fname1 = (char*) malloc (100*sizeof(char));
@@ -350,7 +368,7 @@ void * threadlpf(void * vargp) {
     }
     //printf("newthread %s %s\n", tgtpath, host);
 
-    sprintf(buf, "GET %s HTTP/1.1 %s", tgtpath, host);
+    sprintf(buf, "GET %s HTTP/1.1", tgtpath);
     printf("LPF %s\n", buf);
     sendfd = open_sendfd(80, host);
     if (sendfd >= 0) {
@@ -358,12 +376,14 @@ void * threadlpf(void * vargp) {
         bzero(resp, MAXREAD);
         m = read(sendfd, resp, MAXREAD);
         if (m >= 0) {
-            printf("LPF Store to cache\n");
+            printf("LPF Store to cache %s\n", tgtpath);
             pthread_mutex_lock(&mtx);
             found = 0;
             for (i = 0; i < cacheLen && found == 0; i++) {
                 if(strcmp(tgtpath, cacheList[i][0]) == 0) {
-                    //cacheList[i][2] = New time
+                    time_t rawtime;
+                    time(&rawtime);
+                    sprintf(cacheList[i][2], "%ld", rawtime);
                     sprintf(fname1, "./cached/%s", cacheList[i][1]);
                     fp = fopen(fname1, "wb+");
                     fseek(fp, 0, SEEK_SET);
@@ -377,7 +397,9 @@ void * threadlpf(void * vargp) {
                 sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
                 strcpy(cacheList[cacheLen][1], fname);
                 sprintf(fname1, "./cached/%s", fname);
-                //printf("m = %d\n", (int)m);
+                time_t rawtime;
+                time(&rawtime);
+                sprintf(cacheList[i][2], "%ld", rawtime);
                 fp = fopen(fname1, "wb+");
                 fseek(fp, 0, SEEK_SET);
                 fwrite(resp, 1, m, fp);
@@ -457,7 +479,7 @@ int open_sendfd(int port, char *host) {
         return -1;
     bzero((char *) &serveraddr, sizeof(serveraddr));
     serveraddr.sin_family = AF_INET; 
-    serveraddr.sin_addr.s_addr = inet_addr(hostip); 
+    serveraddr.sin_addr.s_addr = inet_addr(hostip);
     serveraddr.sin_port = htons((unsigned short)port);
     if (connect(sendfd, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0)
         return -1;
