@@ -26,9 +26,16 @@ char* getFType(char *tgtpath);
 char* hostname_to_ip(char *hostname);
 char* checkCache(char *url);
 char* str2md5(const char *str, int length);
+void *threadlpf(void *vargp);
+
+struct lpfwrapper {
+    char *fname;
+    char *hostname;
+};
 
 char ***cacheList;
 int cacheLen;
+pthread_mutex_t mtx=PTHREAD_MUTEX_INITIALIZER;
 
 int main(int argc, char **argv) {
     int i, j, listenfd, *connfdp, port, clientlen=sizeof(struct sockaddr_in);
@@ -198,6 +205,7 @@ void * thread(void * vargp) {
                     sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                     write(connfd, resp, strlen(resp));
                 } else {
+                    pthread_mutex_lock(&mtx);
                     fpath = checkCache(tgtpath);
                     lpf = 0;
                     if (strcmp(fpath, "") == 0) {
@@ -211,10 +219,11 @@ void * thread(void * vargp) {
                             sprintf(resp, "%s 400 Bad Request\r\nContent-Type:text/html\r\nContent-Length:%d\r\n\r\n%s", httpver, (int)strlen(msg), msg);
                             m = strlen(resp);
                         } else {
-                            printf("Store to cache\n");
+                            printf("Store to cache ");
                             found = 0;
                             for (i = 0; i < cacheLen && found == 0; i++) {
                                 if(strcmp(tgtpath, cacheList[i][0]) == 0) {
+                                    printf("Update Existing\n");
                                     //cacheList[i][2] = New time
                                     sprintf(fname1, "./cached/%s", cacheList[i][1]);
                                     fp = fopen(fname1, "wb+");
@@ -225,6 +234,7 @@ void * thread(void * vargp) {
                                 }
                             }
                             if (!found) {
+                                printf("New\n");
                                 strcpy(cacheList[cacheLen][0], tgtpath);
                                 sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
                                 strcpy(cacheList[cacheLen][1], fname);
@@ -236,7 +246,6 @@ void * thread(void * vargp) {
                                 fclose(fp);
                                 cacheLen++;
                             }
-
                             //Link Prefetching
                             if (strcmp("html", getFType(tgtpath)) == 0) {
                                 lpf = 1;
@@ -251,7 +260,11 @@ void * thread(void * vargp) {
                         m = fread(resp, 1, MAXREAD, fp);
                         fclose(fp);
                     }
+                    //printf("cacheLen = %d\n", cacheLen);
+                    pthread_mutex_unlock(&mtx);
                     write(connfd, resp, m);
+
+                    //Link Prefetching
                     if (lpf) {
                         lpftok = strtok_r(resp, "<", &contextlpf);
                         while(lpftok) {
@@ -265,7 +278,13 @@ void * thread(void * vargp) {
                                         linklpf = strtok_r(NULL, "\"", &contextlinklpf);
                                         if (linklpf != NULL) {
                                             //printf("%s\n\n", linklpf);
-
+                                            pthread_t tidlpf;
+                                            struct lpfwrapper *mywrapper = (struct lpfwrapper*) malloc (sizeof(struct lpfwrapper));
+                                            mywrapper->fname = (char*) malloc (100*sizeof(char));
+                                            mywrapper->hostname = (char*) malloc (100*sizeof(char));
+                                            strcpy(mywrapper->fname, linklpf);
+                                            strcpy(mywrapper->hostname, host);
+                                            pthread_create(&tidlpf, NULL, threadlpf, mywrapper);
                                         }
                                     }
                                     j++;
@@ -289,6 +308,87 @@ void * thread(void * vargp) {
     }
     printf("Closing thread\n");
     close(connfd);
+    return NULL;
+}
+
+void * threadlpf(void * vargp) {
+    struct lpfwrapper *mywrapper = ((struct lpfwrapper *)vargp);
+    char *myfname = (char*) malloc (100*sizeof(char));
+    char *host = (char*) malloc (100*sizeof(char));
+    strcpy(myfname, mywrapper->fname);
+    strcpy(host, mywrapper->hostname);
+    pthread_detach(pthread_self());
+    free(vargp);
+
+    size_t n, m;
+    int i, j, found, sendfd;
+    int keepalive = 0; /* Denotes if the current request is persistent */
+    int first = 1; /* Denotes if this is the first execution of the while loop */
+    int msgsz; /* Size of data read from the file */
+    char buf[MAXREAD]; /* Request full message */
+    char *tgtpath = (char*) malloc (100*sizeof(char));
+    char *hosttok;
+    char *contexthost = NULL;
+    char *resp = (char*) malloc (MAXREAD*sizeof(char));
+    char *fpath;
+    char *fname = (char*) malloc (100*sizeof(char));
+    char *fname1 = (char*) malloc (100*sizeof(char));
+    char c;
+    FILE *fp; /* File descriptor to open the file */
+
+
+    if (strlen(myfname) < 4) {
+        //DO NOTHING
+        return NULL;
+    } else if (myfname[0] == 'h' && myfname[1] == 't' && myfname[2] == 't' && myfname[3] == 'p') {
+        strcpy(tgtpath, myfname);
+        free(host);
+        host = strtok_r(myfname, "/", &contexthost);
+        host = strtok_r(NULL, "/", &contexthost);
+    } else {
+        sprintf(tgtpath, "http://%s/%s", host, myfname);
+    }
+    //printf("newthread %s %s\n", tgtpath, host);
+
+    sprintf(buf, "GET %s HTTP/1.1 %s", tgtpath, host);
+    printf("LPF %s\n", buf);
+    sendfd = open_sendfd(80, host);
+    if (sendfd >= 0) {
+        write(sendfd, buf, strlen(buf));
+        bzero(resp, MAXREAD);
+        m = read(sendfd, resp, MAXREAD);
+        if (m >= 0) {
+            printf("LPF Store to cache\n");
+            pthread_mutex_lock(&mtx);
+            found = 0;
+            for (i = 0; i < cacheLen && found == 0; i++) {
+                if(strcmp(tgtpath, cacheList[i][0]) == 0) {
+                    //cacheList[i][2] = New time
+                    sprintf(fname1, "./cached/%s", cacheList[i][1]);
+                    fp = fopen(fname1, "wb+");
+                    fseek(fp, 0, SEEK_SET);
+                    fwrite(resp, 1, m, fp);
+                    fclose(fp);
+                    found = 1;
+                }
+            }
+            if (!found) {
+                strcpy(cacheList[cacheLen][0], tgtpath);
+                sprintf(fname, "%s.%s", str2md5(tgtpath, strlen(tgtpath)), getFType(tgtpath));
+                strcpy(cacheList[cacheLen][1], fname);
+                sprintf(fname1, "./cached/%s", fname);
+                //printf("m = %d\n", (int)m);
+                fp = fopen(fname1, "wb+");
+                fseek(fp, 0, SEEK_SET);
+                fwrite(resp, 1, m, fp);
+                fclose(fp);
+                cacheLen++;
+            }
+            //printf("cacheLen = %d\n", cacheLen);
+            pthread_mutex_unlock(&mtx);
+        }
+    }
+    close(sendfd);
     return NULL;
 }
 
