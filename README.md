@@ -1,8 +1,4 @@
-# Network Systems Programming Assignment 3
-
-Student Details:
-
-Hemanth Chenna - hech9374@colorado.edu
+# Forward proxy with advanced caching
 
 This is a program to run a forward proxy that caches the files being read and responds with those files when requested again. The program also prefetches links in html files and caches them as well.
 
